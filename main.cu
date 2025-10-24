@@ -233,6 +233,13 @@ void naive_gemm(cudaStream_t stream, const Matrix &A, const Matrix &B, Matrix &C
     dim3 gridSize((N + blockSize.x - 1) / blockSize.x, (M + blockSize.y - 1) / blockSize.y);
     naive_gemm_kernel<<<gridSize, blockSize, 0, stream>>>(A.data, B.data, C.data, M, N, K);
 }
+__device__ float4 load_float4(const float *ptr) {
+    float x, y, z, w;
+    asm volatile("ld.global.v4.f32 {%0, %1, %2, %3}, [%4];"
+                 : "=f"(x), "=f"(y), "=f"(z), "=f"(w)
+                 : "l"(ptr));
+    return float4{x, y, z, w};
+}
 
 template<size_t TILE_M, size_t TILE_N, size_t BLOCK_SIZE_X, size_t BLOCK_SIZE_Y, class AddrFn, class MaskFn>
 __device__ void load_matrix_view_to_shared(MatrixView &shared_mat, AddrFn addr_fn, MaskFn mask_fn) {
@@ -245,6 +252,34 @@ __device__ void load_matrix_view_to_shared(MatrixView &shared_mat, AddrFn addr_f
                 shared_mat(y, x) = addr_fn(y, x);
             } else {
                 shared_mat(y, x) = 0.0f;
+            }
+        }
+    }
+}
+template<size_t TILE_M, size_t TILE_N, size_t BLOCK_SIZE_X, size_t BLOCK_SIZE_Y, class AddrFn, class MaskFn>
+__device__ void load_matrix_view_to_shared_vectorized(MatrixView &shared_mat, AddrFn addr_fn, MaskFn mask_fn) {
+// load data into shared memory
+#pragma unroll
+    for (size_t y = threadIdx.y; y < TILE_M; y += BLOCK_SIZE_Y) {
+        if (!mask_fn(y, 0)) {
+            continue;
+        }
+#pragma unroll
+        for (size_t x = threadIdx.x * 4; x < TILE_N; x += BLOCK_SIZE_X * 4) {
+            // vectorized load
+            auto x_hi = x + 4;
+            if (mask_fn(y, x_hi - 1)) {
+                float4 vec = load_float4(addr_fn(y, x));
+                shared_mat(y, x + 0) = vec.x;
+                shared_mat(y, x + 1) = vec.y;
+                shared_mat(y, x + 2) = vec.z;
+                shared_mat(y, x + 3) = vec.w;
+            } else {
+#pragma unroll
+                for (size_t xi = 0; xi < 4; ++xi) {
+                    size_t x_curr = x + xi;
+                    shared_mat(y, x_curr) = mask_fn(y, x_curr) ? *addr_fn(y, x_curr) : 0.0f;
+                }
             }
         }
     }
@@ -420,6 +455,102 @@ void tiled_reg_gemm(cudaStream_t stream, const Matrix &A, const Matrix &B, Matri
     CHECK_CUDA(cudaGetLastError());
 }
 
+template<size_t TILE_M, size_t TILE_N, size_t TILE_K, size_t REG_TILE_M, size_t REG_TILE_N, size_t REG_TILE_K>
+__global__ void tiled_reg_vectorized_gemm_kernel(MatrixView A, MatrixView B, MatrixView C, size_t M, size_t N, size_t K) {
+    // blockDim: (TILE_N / REG_TILE_N, TILE_M / REG_TILE_M)
+    static_assert(TILE_M % REG_TILE_M == 0, "TILE_M must be divisible by REG_TILE_M");
+    static_assert(TILE_N % REG_TILE_N == 0, "TILE_N must be divisible by REG_TILE_N");
+    static_assert(TILE_K % REG_TILE_K == 0, "TILE_K must be divisible by REG_TILE_K");
+    constexpr size_t BLOCK_DIM_X = TILE_N / REG_TILE_N;
+    constexpr size_t BLOCK_DIM_Y = TILE_M / REG_TILE_M;
+
+    __shared__ float shared_A[TILE_M * TILE_K];
+    __shared__ float shared_B[TILE_K * TILE_N];
+    MatrixView A_tile(TILE_M, TILE_K, shared_A);
+    MatrixView B_tile(TILE_K, TILE_N, shared_B);
+
+    size_t row = blockIdx.y * TILE_M + threadIdx.y * REG_TILE_M;
+    size_t col = blockIdx.x * TILE_N + threadIdx.x * REG_TILE_N;
+
+    size_t num_tiles = (K + TILE_K - 1) / TILE_K;
+
+    using RegMatrixA = StaticMatrix<REG_TILE_M, REG_TILE_K>;
+    using RegMatrixB = StaticMatrix<REG_TILE_K, REG_TILE_N>;
+    using RegMatrixC = StaticMatrix<REG_TILE_M, REG_TILE_N>;
+    RegMatrixC reg_C{};
+    for (size_t k_start = 0; k_start < num_tiles; ++k_start) {
+        // load tiles of A and B into shared memory
+
+        load_matrix_view_to_shared_vectorized<TILE_M, TILE_K, BLOCK_DIM_X, BLOCK_DIM_Y>(
+            A_tile,
+            [&](size_t y, size_t x) -> float * {
+                size_t a_row = blockIdx.y * TILE_M + y;
+                size_t a_col = k_start * TILE_K + x;
+                return &A(a_row, a_col);
+            },
+            [&](size_t y, size_t x) {
+                size_t a_row = blockIdx.y * TILE_M + y;
+                size_t a_col = k_start * TILE_K + x;
+                return (a_row < M) && (a_col < K);
+            });
+        load_matrix_view_to_shared_vectorized<TILE_K, TILE_N, BLOCK_DIM_X, BLOCK_DIM_Y>(
+            B_tile,
+            [&](size_t y, size_t x) -> float * {
+                size_t b_row = k_start * TILE_K + y;
+                size_t b_col = blockIdx.x * TILE_N + x;
+                return &B(b_row, b_col);
+            },
+            [&](size_t y, size_t x) {
+                size_t b_row = k_start * TILE_K + y;
+                size_t b_col = blockIdx.x * TILE_N + x;
+                return (b_row < K) && (b_col < N);
+            });
+
+        __syncthreads();
+
+// compute partial results
+#pragma unroll
+        for (size_t k = 0; k < TILE_K / REG_TILE_K; k++) {
+            RegMatrixA reg_A = RegMatrixA::load_from_matrix_view(A_tile, threadIdx.y * REG_TILE_M, k * REG_TILE_K);
+            RegMatrixB reg_B = RegMatrixB::load_from_matrix_view(B_tile, k * REG_TILE_K, threadIdx.x * REG_TILE_N);
+            RegMatrixC::mma<true>(reg_A, reg_B, reg_C);
+        }
+        __syncthreads();
+    }
+// write back results
+#pragma unroll
+    for (size_t i = 0; i < REG_TILE_M; ++i) {
+        size_t global_row = row + i;
+        if (global_row < M) {
+#pragma unroll
+            for (size_t j = 0; j < REG_TILE_N; ++j) {
+                size_t global_col = col + j;
+                if (global_col < N) {
+                    C(global_row, global_col) = reg_C(i, j);
+                }
+            }
+        }
+    }
+}
+
+void tiled_reg_vectorized_gemm(cudaStream_t stream, const Matrix &A, const Matrix &B, Matrix &C) {
+    size_t M = A.rows;
+    size_t K = A.cols;
+    size_t N = B.cols;
+    constexpr size_t TILE_M = 64;
+    constexpr size_t TILE_N = 64;
+    constexpr size_t TILE_K = 32;
+    constexpr size_t REG_TILE_M = 4;
+    constexpr size_t REG_TILE_N = 4;
+    constexpr size_t REG_TILE_K = 4;
+    dim3 blockSize(TILE_N / REG_TILE_N, TILE_M / REG_TILE_M);
+    dim3 gridSize((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
+    tiled_reg_vectorized_gemm_kernel<TILE_M, TILE_N, TILE_K, REG_TILE_M, REG_TILE_N, REG_TILE_K>
+        <<<gridSize, blockSize, 0, stream>>>(MatrixView(A), MatrixView(B), MatrixView(C), M, N, K);
+
+    CHECK_CUDA(cudaGetLastError());
+}
+
 void cublas_gemm(cublasHandle_t handle, const Matrix &A, const Matrix &B, Matrix &C) {
     int M = A.rows;
     int K = A.cols;
@@ -508,6 +639,12 @@ int main(int argc, char **argv) {
     check_result(host_ref_C, host_test_C);
     CHECK_CUDA(cudaStreamSynchronize(stream));
 
+    tiled_reg_vectorized_gemm(stream, A, B, test_C);
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    host_test_C = test_C.to(MatrixStorageType::Host);
+    printf("Checking tiled_reg_vectorized_gemm result...\n");
+    check_result(host_ref_C, host_test_C);
+
     cublasHandle_t cublas_handle;
     CHECK_CUBLAS(cublasCreate(&cublas_handle));
     CHECK_CUBLAS(cublasSetStream(cublas_handle, stream));
@@ -537,15 +674,17 @@ int main(int argc, char **argv) {
         CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
         auto avg_ms = milliseconds / repeats;
         double flops_per_s = static_cast<double>(total_flops) / (avg_ms / 1e3);
-        printf("%s: %f ms GFLOPs/s: %f\n", name.data(), avg_ms, flops_per_s / 1e9);
+        printf("%30s: %10.5f ms GFLOPs/s: %10.3f\n", name.data(), avg_ms, flops_per_s / 1e9);
         CHECK_CUDA(cudaEventDestroy(start));
         CHECK_CUDA(cudaEventDestroy(stop));
     };
-
-    bench("naive_gemm", [&](cudaStream_t s) { naive_gemm(s, A, B, test_C); }, stream, 10, 100);
-    bench("tiled_gemm", [&](cudaStream_t s) { tiled_gemm(s, A, B, test_C); }, stream, 10, 100);
-    bench("tiled_reg_gemm", [&](cudaStream_t s) { tiled_reg_gemm(s, A, B, test_C); }, stream, 10, 100);
-    bench("cublas_gemm", [&](cudaStream_t s) { cublas_gemm(cublas_handle, A, B, test_C); }, stream, 10, 100);
+    auto warm_up = 10;
+    auto repeats = 10;
+    bench("naive_gemm", [&](cudaStream_t s) { naive_gemm(s, A, B, test_C); }, stream, warm_up, repeats);
+    bench("tiled_gemm", [&](cudaStream_t s) { tiled_gemm(s, A, B, test_C); }, stream, warm_up, repeats);
+    bench("tiled_reg_gemm", [&](cudaStream_t s) { tiled_reg_gemm(s, A, B, test_C); }, stream, warm_up, repeats);
+    bench("tiled_reg_vectorized_gemm", [&](cudaStream_t s) { tiled_reg_vectorized_gemm(s, A, B, test_C); }, stream, warm_up, repeats);
+    bench("cublas_gemm", [&](cudaStream_t s) { cublas_gemm(cublas_handle, A, B, test_C); }, stream, warm_up, repeats);
     CHECK_CUBLAS(cublasDestroy(cublas_handle));
     CHECK_CUDA(cudaStreamDestroy(stream));
     return 0;

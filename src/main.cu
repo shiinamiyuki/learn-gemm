@@ -115,6 +115,13 @@ int bench_fp32(size_t M, size_t N, size_t K) {
     check_result(host_ref_C, cublas_ref_C_host, host_test_C);
     printf("tiled_reg_gemm_fp32 passed!\n");
 
+    printf("Checking tile_cp_async_gemm_fp32 result...\n");
+    tile_cp_async_gemm_fp32(stream, A, B, test_C);
+    host_test_C = test_C.to(MatrixStorageType::Host);
+    host_test_C.print();
+    check_result(host_ref_C, cublas_ref_C_host, host_test_C);
+    printf("tile_cp_async_gemm_fp32 passed!\n");
+
     size_t total_flops = 2ull * M * N * K;
     auto bench = [&]<typename F>(const std::string_view name, F &&f, cudaStream_t stream, size_t warm_up, size_t repeats) {
         // warm up
@@ -146,6 +153,7 @@ int bench_fp32(size_t M, size_t N, size_t K) {
     bench("naive_gemm", [&](cudaStream_t s) { naive_gemm_fp32(s, A, B, test_C); }, stream, warm_up, repeats);
     bench("tiled_gemm", [&](cudaStream_t s) { tiled_gemm_fp32(s, A, B, test_C); }, stream, warm_up, repeats);
     bench("tiled_reg_gemm", [&](cudaStream_t s) { tiled_reg_gemm_fp32(s, A, B, test_C); }, stream, warm_up, repeats);
+    bench("tile_cp_async_gemm", [&](cudaStream_t s) { tile_cp_async_gemm_fp32(s, A, B, test_C); }, stream, warm_up, repeats);
     return 0;
 }
 int bench_fp16(size_t M, size_t N, size_t K) {

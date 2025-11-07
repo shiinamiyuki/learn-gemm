@@ -311,6 +311,7 @@ struct StaticMatrix {
 void naive_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
 void tiled_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
 void tiled_reg_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
+void tile_cp_async_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
 void naive_gemm_fp16(cudaStream_t stream, const Matrix<Half> &A, const Matrix<Half> &B, Matrix<Half> &C);
 void gemini_gemm_fp16(cudaStream_t stream, const Matrix<Half> &A, const Matrix<Half> &B, Matrix<Half> &C);
 void grok_gemm_fp16(cudaStream_t stream, const Matrix<Half> &A, const Matrix<Half> &B, Matrix<Half> &C);

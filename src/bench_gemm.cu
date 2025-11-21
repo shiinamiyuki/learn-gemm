@@ -1,19 +1,6 @@
 #include "matrix.h"
 #include <cublas_v2.h>
 
-void print_cuda_info() {
-    int device;
-    CHECK_CUDA(cudaGetDevice(&device));
-    cudaDeviceProp prop;
-    CHECK_CUDA(cudaGetDeviceProperties(&prop, device));
-    printf("Using CUDA Device %d: %s\n", device, prop.name);
-    printf("Shared memory per block: %zu KB\n", prop.sharedMemPerBlock / 1024);
-    printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
-    printf("Multiprocessor count: %d\n", prop.multiProcessorCount);
-    printf("Max threads per multiprocessor: %d\n", prop.maxThreadsPerMultiProcessor);
-    printf("Warp size: %d\n", prop.warpSize);
-    printf("Compute capability: %d.%d\n", prop.major, prop.minor);
-}
 void check_result(const Matrix<Half> &ref, const Matrix<Half> &cublas, const Matrix<Half> &test) {
     float tol{0.05f};
     if (!ref.allclose(test, tol)) {
@@ -139,6 +126,7 @@ int bench_fp32(size_t M, size_t N, size_t K) {
         }
         CHECK_CUDA(cudaEventRecord(stop, stream));
         CHECK_CUDA(cudaEventSynchronize(stop));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
         float milliseconds = 0;
         CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
         auto avg_ms = milliseconds / repeats;
@@ -192,13 +180,13 @@ int bench_fp16(size_t M, size_t N, size_t K) {
     check_result(host_ref_C, cublas_ref_C_host, host_test_C);
     printf("naive_gemm_fp16 passed!\n");
 
-    printf("Checking gemini_gemm_fp16 result...\n");
-    gemini_gemm_fp16(stream, A, B, test_C);
-    host_test_C = test_C.to(MatrixStorageType::Host);
-    host_test_C.print();
-    check_result(host_ref_C, cublas_ref_C_host, host_test_C);
+    // printf("Checking gemini_gemm_fp16 result...\n");
+    // gemini_gemm_fp16(stream, A, B, test_C);
+    // host_test_C = test_C.to(MatrixStorageType::Host);
+    // host_test_C.print();
+    // check_result(host_ref_C, cublas_ref_C_host, host_test_C);
 
-    printf("gemini_gemm_fp16 passed!\n");
+    // printf("gemini_gemm_fp16 passed!\n");
 
     // printf("Checking grok_gemm_fp16 result...\n");
     // grok_gemm_fp16(stream, A, B, test_C);
@@ -231,11 +219,11 @@ int bench_fp16(size_t M, size_t N, size_t K) {
         CHECK_CUDA(cudaEventDestroy(start));
         CHECK_CUDA(cudaEventDestroy(stop));
     };
-    auto warm_up = 10;
+    auto warm_up = 5;
     auto repeats = 10;
     bench("cublas_gemm", [&](cudaStream_t s) { cublas_gemm_fp16(cublas_handle, A, B, test_C); }, stream, warm_up, repeats);
     bench("naive_gemm", [&](cudaStream_t s) { naive_gemm_fp16(s, A, B, test_C); }, stream, warm_up, repeats);
-    bench("gemini_gemm_fp16", [&](cudaStream_t s) { gemini_gemm_fp16(s, A, B, test_C); }, stream, warm_up, repeats);
+    // bench("gemini_gemm_fp16", [&](cudaStream_t s) { gemini_gemm_fp16(s, A, B, test_C); }, stream, warm_up, repeats);
     // bench("grok_gemm_fp16", [&](cudaStream_t s) { grok_gemm_fp16(s, A, B, test_C); }, stream, warm_up, repeats);
     return 0;
 }

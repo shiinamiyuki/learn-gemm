@@ -233,14 +233,19 @@ private:
         }
     }
 };
+template<bool RowMajor = true>
 struct DefaultIndexFn {
+    static constexpr bool is_row_major = RowMajor;
     uint32_t rows, cols;
     __device__ __host__ DefaultIndexFn(uint32_t r, uint32_t c) : rows(r), cols(c) {}
     __device__ __host__ size_t operator()(uint32_t r, uint32_t c) const {
-        return r * cols + c;
+        if constexpr (RowMajor)
+            return r * cols + c;
+        else
+            return c * rows + r;
     }
 };
-template<class T, class IndexFn = DefaultIndexFn>
+template<class T, class IndexFn = DefaultIndexFn<>>
 struct MatrixView {
     uint32_t rows;
     uint32_t cols;
@@ -286,7 +291,7 @@ struct StaticMatrix {
         }
     }
     template<class IndexFn>
-    static __device__ StaticMatrix<T, M, N> load_from_matrix_view(const MatrixView<IndexFn> &mat, uint32_t row_offset, uint32_t col_offset) {
+    static __device__ StaticMatrix<T, M, N> load_from_matrix_view(const MatrixView<T, IndexFn> &mat, uint32_t row_offset, uint32_t col_offset) {
         StaticMatrix<T, M, N> result{};
         // #pragma unroll
         for (uint32_t i = 0; i < M; ++i) {
@@ -308,6 +313,49 @@ struct StaticMatrix {
     //     }
 };
 
+template<int32_t Bits, int32_t Base, int32_t Shift = Bits>
+struct Swizzle {
+    static constexpr int32_t bit_mask = (1u << Bits) - 1u;
+    static constexpr int32_t yyy_mask = bit_mask << (Base + std::max<int32_t>(0, Shift));
+    static constexpr int32_t zzz_mask = bit_mask << (Base - std::min<int32_t>(0, Shift));
+    static constexpr int32_t mask_shift = Shift;
+    __device__ __host__ static uint32_t shiftr(uint32_t value, int32_t shift) {
+        return (shift >= 0) ? (value >> shift) : (value << -shift);
+    }
+    __device__ __host__ static uint32_t apply(uint32_t offset) {
+        return offset ^ shiftr((offset & yyy_mask), mask_shift);
+    }
+};
+__device__ __host__ constexpr uint32_t constexpr_log2(uint32_t n) {
+    return (n <= 1) ? 0 : 1 + constexpr_log2(n / 2);
+}
+template<class T, uint32_t Rows, uint32_t Cols, uint32_t VectorWidth>
+struct Swizzle2D {
+    static constexpr uint32_t base = constexpr_log2(VectorWidth);
+    static constexpr uint32_t bits = constexpr_log2(32 * 4 / sizeof(T)) - base;
+    static constexpr uint32_t shift = constexpr_log2(Cols) - base;
+    static __device__ __host__ size_t apply(uint32_t row, uint32_t col) {
+        uint32_t i = row * Cols + col;
+        return Swizzle<bits, base, shift>::apply(i);
+    }
+};
+
+inline void print_cuda_info() {
+    int device;
+    CHECK_CUDA(cudaGetDevice(&device));
+    cudaDeviceProp prop;
+    CHECK_CUDA(cudaGetDeviceProperties(&prop, device));
+    printf("Using CUDA Device %d: %s\n", device, prop.name);
+    printf("Shared memory per block: %zu KB\n", prop.sharedMemPerBlock / 1024);
+    printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
+    printf("Multiprocessor count: %d\n", prop.multiProcessorCount);
+    printf("Max threads per multiprocessor: %d\n", prop.maxThreadsPerMultiProcessor);
+    printf("Warp size: %d\n", prop.warpSize);
+    printf("Compute capability: %d.%d\n", prop.major, prop.minor);
+}
+
+void naive_transpose_fp32(cudaStream_t stream, const Matrix<float> &A, Matrix<float> &B);
+
 void naive_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
 void tiled_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
 void tiled_reg_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const Matrix<float> &B, Matrix<float> &C);
@@ -315,3 +363,4 @@ void tile_cp_async_gemm_fp32(cudaStream_t stream, const Matrix<float> &A, const 
 void naive_gemm_fp16(cudaStream_t stream, const Matrix<Half> &A, const Matrix<Half> &B, Matrix<Half> &C);
 void gemini_gemm_fp16(cudaStream_t stream, const Matrix<Half> &A, const Matrix<Half> &B, Matrix<Half> &C);
 void grok_gemm_fp16(cudaStream_t stream, const Matrix<Half> &A, const Matrix<Half> &B, Matrix<Half> &C);
+void tiled_transpose_fp32_gemini(cudaStream_t stream, const Matrix<float> &A, Matrix<float> &B);

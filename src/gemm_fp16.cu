@@ -26,21 +26,21 @@ __device__ void store_half8_shared(const Half8 &h8, Half *ptr) {
 }
 
 __device__ void load_matrix_m8n8_x2_b16(const Half *p, __half2 &a0a1, __half2 &a2a3) {
-    uint32_t r0_u32, r1_u32;
-    uint64_t p_val = reinterpret_cast<uint64_t>(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-                 : "=r"(r0_u32), "=r"(r1_u32)
-                 : "l"(p_val));
-    a0a1 = *reinterpret_cast<__half2 *>(&r0_u32);
-    a2a3 = *reinterpret_cast<__half2 *>(&r1_u32);
+    // uint32_t r0_u32, r1_u32;
+    // uint64_t p_val = reinterpret_cast<uint64_t>(p);
+    // asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
+    //              : "=r"(r0_u32), "=r"(r1_u32)
+    //              : "l"(p_val));
+    // a0a1 = *reinterpret_cast<__half2 *>(&r0_u32);
+    // a2a3 = *reinterpret_cast<__half2 *>(&r1_u32);
 }
 __device__ void load_matrix_m8n8_b16(const Half *p, __half2 &a0a1) {
-    uint32_t r0_u32;
-    uint64_t p_val = reinterpret_cast<uint64_t>(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.b16 {%0}, [%1];"
-                 : "=r"(r0_u32)
-                 : "l"(p_val));
-    a0a1 = *reinterpret_cast<__half2 *>(&r0_u32);
+    // uint32_t r0_u32;
+    // uint64_t p_val = reinterpret_cast<uint64_t>(p);
+    // asm volatile("ldmatrix.sync.aligned.m8n8.b16 {%0}, [%1];"
+    //              : "=r"(r0_u32)
+    //              : "l"(p_val));
+    // a0a1 = *reinterpret_cast<__half2 *>(&r0_u32);
 }
 template<uint32_t TILE_M, uint32_t TILE_N, uint32_t BLOCK_SIZE_X, uint32_t BLOCK_SIZE_Y, class IndexFn>
 __device__ void load_matrix_view_to_shared_vectorized(MatrixView<Half> &gm_mat, MatrixView<Half, IndexFn> &shared_mat, uint32_t row_offset, uint32_t col_offset) {
